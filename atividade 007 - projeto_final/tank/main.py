@@ -1,148 +1,311 @@
 # tank/main.py
-
-import pygame  # Garante que 'pygame' esteja definido
-import sys
+# Imports
 import math
+import os
+import sys
+import pygame
 
-# Importações Modulares (AGORA SEPARADAS EM LINHAS DIFERENTES)
-from core.settings import *
-from core.sprites import Bullet 
-from core.ui import Scoreboard 
+# Import from core
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
 
-# --- CLASSE TANK (Com __init__ corrigido) ---
-class Tank(pygame.sprite.Sprite): 
-    
-    def __init__(self, color, x, y, controls):
+from core import (  # noqa: E402
+    WIDTH,
+    HEIGHT,
+    FPS,
+    WHITE,
+    GREEN,
+    YELLOW,
+    init_pygame,
+    load_image_scaled,
+    safe_sound,
+    draw_victory_screen,
+    draw_score_panel,
+    RoundRules,
+    RoundManager,
+)
+
+# Settings
+TANK_SCALE = 0.25
+HITBOX_RATIO = 0.8
+ROT_SPEED = 3
+MOVE_SPEED = 4
+BULLET_SPEED = 10
+SHOOT_CD_MS = 500
+HITS_TO_WIN = 3
+WIN_SCORE_CAP = 99
+
+# Init
+screen, clock, mixer_ok = init_pygame(True)
+pygame.display.set_caption("Tank_game")
+
+# Sounds
+shoot_sfx = safe_sound("tank/assets/bullet.wav", mixer_ok)
+hit_sfx   = safe_sound("tank/assets/hit.wav",    mixer_ok)
+
+# Images
+tank_img_blue = load_image_scaled("tank/assets/tank_blue.png", TANK_SCALE)
+tank_img_red  = load_image_scaled("tank/assets/tank_red.png",  TANK_SCALE)
+
+# Bullet class
+class Bullet(pygame.sprite.Sprite):
+    def __init__(self, x: float, y: float, angle_deg: float, owner_id: int):
         super().__init__()
-        
-        # 1. CRIAÇÃO e DEFINIÇÃO de self.image (Solução do AttributeError)
-        self.image = pygame.Surface((40, 60), pygame.SRCALPHA)
-        
-        # 2. DESENHO na Surface self.image
-        pygame.draw.rect(self.image, color, (0, 0, 40, 60))
-        
-        # 3. CÓPIA para self.original_image (Base para rotação)
-        self.original_image = self.image.copy() 
-        
-        # 4. DEFINIÇÃO do Retângulo
+        self.image = pygame.Surface((6, 6))
+        self.image.fill(WHITE)
         self.rect = self.image.get_rect(center=(x, y))
-        
-        # 5. Outras Propriedades
+        self.angle = angle_deg
+        self.owner_id = owner_id
+
+    def update(self, walls, tanks_by_id, round_mgr: RoundManager):
+        rad = math.radians(self.angle - 270)
+        self.rect.x += math.cos(rad) * BULLET_SPEED
+        self.rect.y -= math.sin(rad) * BULLET_SPEED
+
+        for wall in walls:
+            if self.rect.colliderect(wall.rect):
+                self.kill()
+                return
+
+        target_id = 2 if self.owner_id == 1 else 1
+        target = tanks_by_id[target_id]
+        if target.is_spinning:
+            return
+
+        if self.rect.colliderect(target.hitbox):
+            if hit_sfx:
+                hit_sfx.play()
+            round_mgr.on_hit(attacker_id=self.owner_id, target_id=target_id)
+            self.kill()
+            return
+
+
+# Tank class
+class Tank(pygame.sprite.Sprite):
+    def __init__(self, pid: int, x: int, y: int, controls: dict, image):
+        super().__init__()
+        self.id = pid
+        self.original = image
+        self.image = image.copy()
+        self.rect = self.image.get_rect(center=(x, y))
+        self.hitbox = pygame.Rect(
+            0, 0, int(self.rect.w * HITBOX_RATIO), int(self.rect.h * HITBOX_RATIO)
+        )
+        self.hitbox.center = self.rect.center
+
+        self.angle = 0
         self.controls = controls
-        self.fire_cooldown = 0
-        self.angle = 0 
-        self.speed = PLAYER_SPEED 
-        self.rotation_speed = 3
+        self.hits = 0
+        self.score = 0
+        self.is_spinning = False
+        self.spin_progress = 0.0
+        self._last_shot = -10**9
+
+    def can_shoot(self) -> bool:
+        now = pygame.time.get_ticks()
+        if now - self._last_shot >= SHOOT_CD_MS:
+            self._last_shot = now
+            return True
+        return False
+
+    def shoot(self, bullets_group: pygame.sprite.Group):
+        if not self.can_shoot():
+            return
+        rad = math.radians(self.angle - 270)
+        bx = self.hitbox.centerx + math.cos(rad) * (self.rect.w // 2)
+        by = self.hitbox.centery - math.sin(rad) * (self.rect.h // 2)
+        bullets_group.add(Bullet(bx, by, self.angle, self.id))
+        if shoot_sfx:
+            shoot_sfx.play()
+
+    def update(self, keys, walls):
+        if self.is_spinning:
+            return
+
+        if keys[self.controls["left"]]:
+            self.angle += ROT_SPEED
+        if keys[self.controls["right"]]:
+            self.angle -= ROT_SPEED
+
+        mx = my = 0
+        if keys[self.controls["forward"]]:
+            rad = math.radians(self.angle - 270)
+            mx += math.cos(rad) * MOVE_SPEED
+            my -= math.sin(rad) * MOVE_SPEED
+
+        new_hit = self.hitbox.move(mx, my)
+        if not any(new_hit.colliderect(w.rect) for w in walls):
+            self.hitbox = new_hit
+
+        self.image = pygame.transform.rotate(self.original, self.angle)
+        self.rect = self.image.get_rect(center=self.hitbox.center)
+
+    def update_animation(self):
+        if self.is_spinning:
+            self.spin_progress += 18
+            self.image = pygame.transform.rotate(
+                self.original, self.angle + self.spin_progress
+            )
+            self.rect = self.image.get_rect(center=self.hitbox.center)
+            if self.spin_progress >= 360:
+                self.is_spinning = False
+                self.spin_progress = 0.0
+
+    def draw_hitbox(self, surf: pygame.Surface):
+        pygame.draw.rect(surf, GREEN, self.hitbox, 1)
 
 
-    def rotate(self, angle_change):
-        self.angle += angle_change
-        self.angle %= 360
-        original_center = self.rect.center
-        self.image = pygame.transform.rotate(self.original_image, -self.angle)
-        self.rect = self.image.get_rect(center=original_center)
-        
-    def fire(self, bullets_group):
-        if self.fire_cooldown <= 0:
-            
-            # Cálculo da ponta do canhão
-            rad = math.radians(self.angle)
-            muzzle_dist = 30 
-            start_x = self.rect.centerx + muzzle_dist * math.sin(rad)
-            start_y = self.rect.centery - muzzle_dist * math.cos(rad) 
-
-            new_bullet = Bullet(start_x, start_y, self.angle, owner=self)
-            bullets_group.add(new_bullet)
-            self.fire_cooldown = 30 
-
-    def update(self, keys, bullets_group, tanks_group=None):
-        if keys[self.controls["left"]]: self.rotate(self.rotation_speed)
-        if keys[self.controls["right"]]: self.rotate(-self.rotation_speed)
-            
-        current_speed = 0
-        if keys[self.controls["forward"]]: current_speed = self.speed
-        elif keys[self.controls["backward"]]: current_speed = -self.speed * 0.5
-            
-        if current_speed != 0:
-            rad = math.radians(self.angle)
-            dx = current_speed * math.sin(rad)
-            dy = current_speed * math.cos(rad)
-            self.rect.x += dx
-            self.rect.y += dy
-            
-            # Colisão com tanques
-            if tanks_group:
-                for tank in tanks_group:
-                    if tank != self and self.rect.colliderect(tank.rect):
-                        self.rect.x -= dx
-                        self.rect.y -= dy
-                        break
-
-        self.rect.clamp_ip(pygame.Rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT))
-
-        if keys[self.controls["fire"]]:
-            self.fire(bullets_group)
-
-        if self.fire_cooldown > 0: self.fire_cooldown -= 1
+# Wall class
+class Wall(pygame.sprite.Sprite):
+    def __init__(self, x: int, y: int, w: int, h: int):
+        super().__init__()
+        self.image = pygame.Surface((w, h))
+        self.image.fill((120, 180, 80))
+        self.rect = self.image.get_rect(topleft=(x, y))
 
 
-# --- FUNÇÃO DE EXECUÇÃO DO JOGO ---
-def run_tank_game():
-    
-    if not pygame.get_init():
-        pygame.init()
-        
-    screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
-    pygame.display.set_caption("Combate - Tanques")
-    clock = pygame.time.Clock()
-    
-    scoreboard = Scoreboard(screen) 
+# Walls
+def build_walls():
+    walls = pygame.sprite.Group()
+    b = 15  # borda externa mais fina
+    data = [
+        # bordas
+        (0, 0, WIDTH, b),
+        (0, HEIGHT - b, WIDTH, b),
+        (0, 0, b, HEIGHT),
+        (WIDTH - b, 0, b, HEIGHT),
 
-    controls_p1 = { "left": pygame.K_a, "right": pygame.K_d, "forward": pygame.K_w, "backward": pygame.K_s, "fire": pygame.K_SPACE }
-    controls_p2 = { "left": pygame.K_LEFT, "right": pygame.K_RIGHT, "forward": pygame.K_UP, "backward": pygame.K_DOWN, "fire": pygame.K_RETURN }
+        # cruz central
+        (WIDTH // 2 - 10, 100, 20, HEIGHT - 200),
+        (200, HEIGHT // 2 - 10, WIDTH - 400, 20),
 
-    tank1 = Tank(GREEN, 200, 300, controls_p1)
-    tank2 = Tank(RED, 600, 300, controls_p2)
+        # blocos laterais esquerdos
+        (150, 150, 200, 20),
+        (150, 350, 20, 150),
+        (150, HEIGHT - 200, 200, 20),
 
-    tanks_group = pygame.sprite.Group(tank1, tank2)
-    bullets_group = pygame.sprite.Group()
+        # blocos laterais direitos
+        (WIDTH - 350, 150, 200, 20),
+        (WIDTH - 170, 350, 20, 150),
+        (WIDTH - 350, HEIGHT - 200, 200, 20),
 
-    running = True
-    while running:
-        keys = pygame.key.get_pressed()
+        # obstáculos centrais
+        (WIDTH // 2 - 100, HEIGHT // 2 - 150, 40, 80),
+        (WIDTH // 2 + 40, HEIGHT // 2 + 50, 40, 80),
 
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                running = False
-            if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
-                running = False 
-
-        tanks_group.update(keys, bullets_group, tanks_group) 
-        bullets_group.update()
-        
-        for tank in tanks_group:
-            hit_bullets = pygame.sprite.spritecollide(tank, bullets_group, False) 
-            
-            for bullet in hit_bullets:
-                if bullet.owner != tank and bullet.delay == 0:
-                    
-                    if tank == tank1:
-                        scoreboard.add_score(2) 
-                    elif tank == tank2:
-                        scoreboard.add_score(1) 
-                    
-                    bullet.kill()
-
-        screen.fill(BLACK)
-        tanks_group.draw(screen)
-        bullets_group.draw(screen)
-        scoreboard.draw() 
-
-        pygame.display.flip()
-        clock.tick(FPS)
+        # passagens diagonais
+        (WIDTH // 4, HEIGHT // 4 + 60, 100, 20),
+        (WIDTH // 4 * 3 - 150, HEIGHT // 4 * 3 - 60, 100, 20),
+    ]
+    for item in data:
+        walls.add(Wall(*item))
+    return walls
 
 
-if __name__ == "__main__":
-    run_tank_game()
-    pygame.quit()
-    sys.exit()
+
+# Controls
+controls1 = {
+    "left": pygame.K_LEFT,
+    "right": pygame.K_RIGHT,
+    "forward": pygame.K_UP,
+    "shoot": pygame.K_KP_ENTER,
+}
+controls2 = {
+    "left": pygame.K_a,
+    "right": pygame.K_d,
+    "forward": pygame.K_w,
+    "shoot": pygame.K_SPACE,
+}
+
+# Objects
+walls = build_walls()
+bullets = pygame.sprite.Group()
+players = pygame.sprite.Group()
+
+p1 = Tank(1, 150, HEIGHT // 2, controls1, tank_img_blue)
+p2 = Tank(2, WIDTH - 150, HEIGHT // 2, controls2, tank_img_red)
+players.add(p1, p2)
+
+# Round manager
+tanks_by_id = {1: p1, 2: p2}
+round_mgr = RoundManager(
+    RoundRules(hits_to_win=HITS_TO_WIN, score_cap=WIN_SCORE_CAP),
+    tanks_by_id,
+)
+
+# Respawn and clear
+def respawn_tank(players: dict[int, Tank]):
+    p1_local = players[1]
+    p2_local = players[2]
+
+    p1_local.angle = 0
+    p2_local.angle = 0
+
+    p1_local.hitbox.center = (150, HEIGHT // 2)
+    p2_local.hitbox.center = (WIDTH - 150, HEIGHT // 2)
+
+    p1_local.image = pygame.transform.rotate(p1_local.original, p1_local.angle)
+    p2_local.image = pygame.transform.rotate(p2_local.original, p2_local.angle)
+
+    p1_local.rect = p1_local.image.get_rect(center=p1_local.hitbox.center)
+    p2_local.rect = p2_local.image.get_rect(center=p2_local.hitbox.center)
+
+def clear_bullets_tank():
+    bullets.empty()
+
+# Events
+def handle_events():
+    global running
+    for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+            running = False
+
+# Update
+def update(dt: float, keys):
+    if round_mgr.round_over:
+        round_mgr.update_animations()
+        if keys[pygame.K_SPACE]:
+            round_mgr.reset_round(respawn_tank, clear_bullets_tank)
+        return
+
+    if keys[controls1["shoot"]]:
+        p1.shoot(bullets)
+    if keys[controls2["shoot"]]:
+        p2.shoot(bullets)
+
+    p1.update(keys, walls)
+    p2.update(keys, walls)
+    bullets.update(walls, tanks_by_id, round_mgr)
+
+    p1.update_animation()
+    p2.update_animation()
+
+# Draw
+def draw():
+    screen.fill((140, 200, 255)) 
+    walls.draw(screen)
+    players.draw(screen)
+    bullets.draw(screen)
+
+    draw_score_panel(screen, p1.score, p2.score)
+
+    if round_mgr.round_over:
+        _, tank_text = round_mgr.winner_text(
+            prefix_ship="Player ", prefix_tank="PLAYER "
+        )
+        draw_victory_screen(screen, tank_text, "Press SPACE to continue")
+
+    pygame.display.flip()
+
+# Main loop
+running = True
+while running:
+    dt = clock.tick(FPS) / 1000.0
+    handle_events()
+    pressed = pygame.key.get_pressed()
+    update(dt, pressed)
+    draw()
+
+pygame.quit()
+sys.exit()
