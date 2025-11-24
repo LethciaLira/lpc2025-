@@ -1,0 +1,36 @@
+@startuml
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Component.puml
+
+LAYOUT_WITH_LEGEND()
+
+title Diagrama de Componentes (Nível 3) - Asteroids Game
+
+System_Boundary(asteroids, "Asteroids Game") {
+  
+  Component(main, "main.py", "Ponto de Entrada", "Inicialização e Configuração")
+  Component(game, "game.py", "GAME", "Loop Principal, I/O, Menus")
+  Component(system, "systems.py", "SYSTEM", "Regras do Jogo, Lógica de Spawn e Colisão")
+  Component(sprites, "sprites.py", "SPRITES", "Desenhos e Definições de Entidades (Naves, Asteroides, Tiros)")
+  Component(sound, "sound.py", "SOUND", "Gerenciamento de Efeitos Sonoros e Música - NOVO")
+  Component(utils, "utils.py", "UTILS", "Funções Utilitárias")
+  Component(config, "config.py", "CONFIG", "Constantes e Configurações")
+
+  Rel(main, game, "Chama e executa o loop principal")
+  
+  Rel(game, system, "Gerencia a execução da lógica de jogo (update/draw)")
+  Rel(game, sound, "Inicia o mixer e a música")
+  Rel(game, sprites, "Cria novas instâncias de Tiro e gerencia o jogador")
+  
+  Rel_U(system, sprites, "Processa estados, executa lógica de spawn e destrói entidades")
+  Rel(system, sound, "Aciona efeitos sonoros de eventos (explosão, tiro, spawn)")
+  Rel(system, config, "Lê constantes de spawn e velocidade")
+  Rel(system, utils, "Utiliza funções auxiliares para cálculos (ex: distância, ângulo)")
+  
+}
+
+Person(user, "Usuário", "O jogador que fornece inputs e recebe feedback.")
+
+Rel(user, main, "Inicia e interage com o jogo")
+Rel(main, user, "Exibe feedback visual e auditivo")
+
+@enduml
